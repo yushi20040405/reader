@@ -1,0 +1,98 @@
+/*
+ * Theme CSS variables. Colors must never be hardcoded in components — always
+ * reference these variables. The day palette lives on `:root`; `eye` and
+ * `night` override the same variables via `[data-theme=...]` so switching is
+ * instant and never resets typography.
+ *
+ * Body-text contrast (reader-text on reader-bg) is >= 4.5:1 in every theme.
+ */
+:root,
+[data-theme='day'] {
+  --bg: #ffffff;
+  --bg-toolbar: #ffffff;
+  --bg-panel: #f7f6f3;
+  --bg-toc: #faf9f6;
+  --bg-reader: #ffffff;
+
+  --text: #1f2328;
+  --text-secondary: #57606a;
+  --text-on-accent: #ffffff;
+
+  --border: #e3e1dc;
+  --accent: #2f6fed;
+  --accent-soft: rgba(47, 111, 237, 0.12);
+  --hover: rgba(0, 0, 0, 0.05);
+  --active: rgba(47, 111, 237, 0.16);
+
+  --reader-text: #1f2328;
+  --reader-bg: #ffffff;
+
+  --error-bg: #b3261e;
+  --error-text: #ffffff;
+
+  --scrollbar-thumb: #c9c7c0;
+  --scrollbar-track: transparent;
+
+  --link: var(--accent);
+  --selected: var(--active);
+}
+
+[data-theme='eye'] {
+  --bg: #f6f1e7;
+  --bg-toolbar: #efe8d9;
+  --bg-panel: #eae2d0;
+  --bg-toc: #f1eadb;
+  --bg-reader: #f6f1e7;
+
+  --text: #3a352a;
+  --text-secondary: #655c4b;
+  --text-on-accent: #ffffff;
+
+  --border: #d9cfba;
+  --accent: #2f6b4f;
+  --accent-soft: rgba(47, 107, 79, 0.14);
+  --hover: rgba(0, 0, 0, 0.06);
+  --active: rgba(47, 107, 79, 0.18);
+
+  --reader-text: #3a352a;
+  --reader-bg: #f6f1e7;
+
+  --error-bg: #a94442;
+  --error-text: #ffffff;
+
+  --scrollbar-thumb: #c9bfa9;
+  --scrollbar-track: transparent;
+
+  --link: var(--accent);
+  --selected: var(--active);
+}
+
+[data-theme='night'] {
+  --bg: #16171b;
+  --bg-toolbar: #1e2026;
+  --bg-panel: #1a1c21;
+  --bg-toc: #1e2026;
+  --bg-reader: #16171b;
+
+  --text: #d6d6dc;
+  --text-secondary: #9aa0ab;
+  --text-on-accent: #ffffff;
+
+  --border: #34373f;
+  --accent: #7aa8ff;
+  --accent-soft: rgba(122, 168, 255, 0.16);
+  --hover: rgba(255, 255, 255, 0.07);
+  --active: rgba(122, 168, 255, 0.22);
+
+  --reader-text: #c9c9cf;
+  --reader-bg: #16171b;
+
+  --error-bg: #7a2f2d;
+  --error-text: #ffdada;
+
+  --scrollbar-thumb: #3d4048;
+  --scrollbar-track: transparent;
+
+  --link: var(--accent);
+  --selected: var(--active);
+}

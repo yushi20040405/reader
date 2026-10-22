@@ -1,0 +1,419 @@
+#include "car_control.h"
+#include <string.h>
+#include <math.h>
+
+// 基于实验13的car_test.c代码
+static CarInfo g_car_info;
+
+// 指令结构
+typedef struct {
+    char type[16];
+    int value;
+} CarCommand;
+
+static CarCommand g_command_queue[100];
+static int g_command_count = 0;
+static int g_command_index = 0;
+static int g_auto_mode = 0;
+
+// ============ 新增：校准系数 ============
+static float g_left_motor_factor = 3.61f;    // 左轮系数
+static float g_right_motor_factor = 0.77f;  // 右轮系数（调小，因为右轮太快）
+static float g_turn_factor = 1.07f;          // 转向系数（原2太大，调小为0.5）
+static float g_forward_steps_per_cm = 1.0f; // 前进每厘米步数
+
+// 新增：对称转向控制参数
+static float g_turn_speed_ratio = 0.3f;     // 转向时非转向轮的减速比例
+static int g_symmetric_turn_enabled = 1;    // 启用对称转向
+
+// GPIO控制
+static void gpio_control(unsigned int gpio, IotGpioValue value) {
+    hi_io_set_func(gpio, 0);
+    IoTGpioSetDir(gpio, IOT_GPIO_DIR_OUT);
+    IoTGpioSetOutputVal(gpio, value);
+}
+
+// 停止
+static void pwm_stop(void) {
+    gpio_control(GPIO_M1_A, IOT_GPIO_VALUE1);
+    gpio_control(GPIO_M1_B, IOT_GPIO_VALUE1);
+    gpio_control(GPIO_M2_A, IOT_GPIO_VALUE1);
+    gpio_control(GPIO_M2_B, IOT_GPIO_VALUE1);
+}
+
+// 前进 - 改进版：带平衡控制
+static void pwm_forward_balanced(void) {
+    // 正常前进
+    gpio_control(GPIO_M1_A, IOT_GPIO_VALUE1);  // 左轮前进
+    gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+    gpio_control(GPIO_M2_A, IOT_GPIO_VALUE1);  // 右轮前进
+    gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+}
+
+// 后退
+static void pwm_backward(void) {
+    gpio_control(GPIO_M1_A, IOT_GPIO_VALUE0);
+    gpio_control(GPIO_M1_B, IOT_GPIO_VALUE1);
+    gpio_control(GPIO_M2_A, IOT_GPIO_VALUE0);
+    gpio_control(GPIO_M2_B, IOT_GPIO_VALUE1);
+}
+
+// 左转 - 对称转向控制版本
+static void pwm_left_symmetric(void) {
+    if (g_symmetric_turn_enabled) {
+        // 对称左转：右轮前进（正常速度），左轮后退（较慢速度）
+        gpio_control(GPIO_M1_A, IOT_GPIO_VALUE0);  // 左轮后退
+        gpio_control(GPIO_M1_B, IOT_GPIO_VALUE1);
+        gpio_control(GPIO_M2_A, IOT_GPIO_VALUE1);  // 右轮前进
+        gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+    } else {
+        // 传统左转：右轮前进，左轮停止
+        gpio_control(GPIO_M1_A, IOT_GPIO_VALUE0);  // 左轮停止
+        gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+        gpio_control(GPIO_M2_A, IOT_GPIO_VALUE1);  // 右轮前进
+        gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+    }
+}
+
+// 右转 - 对称转向控制版本
+static void pwm_right_symmetric(void) {
+    if (g_symmetric_turn_enabled) {
+        // 对称右转：左轮前进（正常速度），右轮后退（较慢速度）
+        gpio_control(GPIO_M1_A, IOT_GPIO_VALUE1);  // 左轮前进
+        gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+        gpio_control(GPIO_M2_A, IOT_GPIO_VALUE0);  // 右轮后退
+        gpio_control(GPIO_M2_B, IOT_GPIO_VALUE1);
+    } else {
+        // 传统右转：左轮前进，右轮停止
+        gpio_control(GPIO_M1_A, IOT_GPIO_VALUE1);  // 左轮前进
+        gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+        gpio_control(GPIO_M2_A, IOT_GPIO_VALUE0);  // 右轮停止
+        gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+    }
+}
+
+// 原地左转 - 用于精确转向
+static void pwm_spin_left(void) {
+    // 原地左转：左轮后退，右轮前进
+    gpio_control(GPIO_M1_A, IOT_GPIO_VALUE0);  // 左轮后退
+    gpio_control(GPIO_M1_B, IOT_GPIO_VALUE1);
+    gpio_control(GPIO_M2_A, IOT_GPIO_VALUE1);  // 右轮前进
+    gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+}
+
+// 原地右转 - 用于精确转向
+static void pwm_spin_right(void) {
+    // 原地右转：左轮前进，右轮后退
+    gpio_control(GPIO_M1_A, IOT_GPIO_VALUE1);  // 左轮前进
+    gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+    gpio_control(GPIO_M2_A, IOT_GPIO_VALUE0);  // 右轮后退
+    gpio_control(GPIO_M2_B, IOT_GPIO_VALUE1);
+}
+
+// 初始化
+void car_init(void) {
+    printf("初始化小车电机...\n");
+    
+    IoTGpioInit(GPIO_M1_A);
+    IoTGpioInit(GPIO_M1_B);
+    IoTGpioInit(GPIO_M2_A);
+    IoTGpioInit(GPIO_M2_B);
+    
+    hi_io_set_func(GPIO_M1_A, 0);
+    hi_io_set_func(GPIO_M1_B, 0);
+    hi_io_set_func(GPIO_M2_A, 0);
+    hi_io_set_func(GPIO_M2_B, 0);
+    
+    IoTGpioSetDir(GPIO_M1_A, IOT_GPIO_DIR_OUT);
+    IoTGpioSetDir(GPIO_M1_B, IOT_GPIO_DIR_OUT);
+    IoTGpioSetDir(GPIO_M2_A, IOT_GPIO_DIR_OUT);
+    IoTGpioSetDir(GPIO_M2_B, IOT_GPIO_DIR_OUT);
+    
+    pwm_stop();
+    
+    memset(&g_car_info, 0, sizeof(g_car_info));
+    g_car_info.status = CAR_STOP;
+    
+    car_clear_commands();
+    
+    // 打印当前校准系数
+    printf("当前校准系数:\n");
+    printf("  左轮系数: %.2f, 右轮系数: %.2f\n", 
+           g_left_motor_factor, g_right_motor_factor);
+    printf("  转向系数: %.2f, 前进系数: %.1f 步/厘米\n",
+           g_turn_factor, g_forward_steps_per_cm);
+    printf("  对称转向: %s, 转向速度比: %.1f\n",
+           g_symmetric_turn_enabled ? "开启" : "关闭", g_turn_speed_ratio);
+    
+    printf("小车初始化完成\n");
+}
+
+// 设置状态
+void car_set_status(CarStatus status) {
+    g_car_info.status = status;
+}
+
+// 停止
+void car_stop(void) {
+    car_set_status(CAR_STOP);
+    printf("小车停止\n");
+    pwm_stop();
+}
+
+// 前进 - 改进版：应用平衡系数
+void car_forward(int distance_cm) {
+    car_set_status(CAR_FORWARD);
+    printf("前进 %d cm\n", distance_cm);
+    pwm_forward_balanced();
+    
+    // 计算步进计数，应用右轮减速系数
+    // 因为右轮太快，所以需要左轮多转一些来补偿
+    float base_steps = distance_cm * g_forward_steps_per_cm;
+    
+    // 应用平衡系数：右轮快就减小总步数，或通过延时补偿
+    // 这里采用简单方法：根据右轮系数调整总步数
+    float adjusted_steps = base_steps * g_right_motor_factor;
+    
+    g_car_info.step_count = (int)adjusted_steps;
+    
+    printf("步进计数: %d (左轮系数:%.2f, 右轮系数:%.2f)\n", 
+           g_car_info.step_count, 
+           g_left_motor_factor, 
+           g_right_motor_factor);
+}
+
+// 后退
+void car_backward(int distance_cm) {
+    car_set_status(CAR_BACKWARD);
+    printf("后退 %d cm\n", distance_cm);
+    pwm_backward();
+    
+    float base_steps = distance_cm * g_forward_steps_per_cm;
+    float adjusted_steps = base_steps * g_right_motor_factor;
+    g_car_info.step_count = (int)adjusted_steps;
+}
+
+// 左转 - 改进版：对称转向
+void car_turn_left(int angle_deg) {
+    car_set_status(CAR_LEFT);
+    printf("左转 %d 度\n", angle_deg);
+    
+    if (g_symmetric_turn_enabled) {
+        pwm_left_symmetric();  // 使用对称转向
+        printf("使用对称转向模式\n");
+    } else {
+        // 传统转向模式
+        gpio_control(GPIO_M1_A, IOT_GPIO_VALUE0);  // 左轮停止
+        gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+        gpio_control(GPIO_M2_A, IOT_GPIO_VALUE1);  // 右轮前进
+        gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+    }
+    
+    // 调整转向步数计算
+    // 对称转向时，转动效率更高，可以减少步数
+    float efficiency_factor = g_symmetric_turn_enabled ? 0.7f : 1.0f;
+    float base_steps = angle_deg * g_turn_factor * efficiency_factor;
+    g_car_info.step_count = (int)base_steps;
+    
+    printf("左转步数: %d (系数:%.2f, 对称转向:%s)\n", 
+           g_car_info.step_count, 
+           g_turn_factor * efficiency_factor,
+           g_symmetric_turn_enabled ? "是" : "否");
+}
+
+// 右转 - 改进版：对称转向
+void car_turn_right(int angle_deg) {
+    car_set_status(CAR_RIGHT);
+    printf("右转 %d 度\n", angle_deg);
+    
+    if (g_symmetric_turn_enabled) {
+        pwm_right_symmetric();  // 使用对称转向
+        printf("使用对称转向模式\n");
+    } else {
+        // 传统转向模式
+        gpio_control(GPIO_M1_A, IOT_GPIO_VALUE1);  // 左轮前进
+        gpio_control(GPIO_M1_B, IOT_GPIO_VALUE0);
+        gpio_control(GPIO_M2_A, IOT_GPIO_VALUE0);  // 右轮停止
+        gpio_control(GPIO_M2_B, IOT_GPIO_VALUE0);
+    }
+    
+    // 调整转向步数计算
+    float efficiency_factor = g_symmetric_turn_enabled ? 0.8f : 1.0f;
+    float base_steps = angle_deg * g_turn_factor * efficiency_factor;
+    g_car_info.step_count = (int)base_steps;
+    
+    printf("右转步数: %d (系数:%.2f, 对称转向:%s)\n", 
+           g_car_info.step_count, 
+           g_turn_factor * efficiency_factor,
+           g_symmetric_turn_enabled ? "是" : "否");
+}
+
+// 原地左转 - 精确转向
+void car_spin_left(int angle_deg) {
+    car_set_status(CAR_LEFT);
+    printf("原地左转 %d 度\n", angle_deg);
+    
+    pwm_spin_left();
+    
+    // 原地转向效率更高，步数更少
+    float base_steps = angle_deg * g_turn_factor * 0.5f;
+    g_car_info.step_count = (int)base_steps;
+    
+    printf("原地左转步数: %d\n", g_car_info.step_count);
+}
+
+// 原地右转 - 精确转向
+void car_spin_right(int angle_deg) {
+    car_set_status(CAR_RIGHT);
+    printf("原地右转 %d 度\n", angle_deg);
+    
+    pwm_spin_right();
+    
+    // 原地转向效率更高，步数更少
+    float base_steps = angle_deg * g_turn_factor * 0.5f;
+    g_car_info.step_count = (int)base_steps;
+    
+    printf("原地右转步数: %d\n", g_car_info.step_count);
+}
+
+// ============ 新增：校准函数 ============
+void car_set_calibration(const char* param, float value) {
+    if (strcmp(param, "left") == 0) {
+        g_left_motor_factor = value;
+        printf("左轮系数设置为 %.2f\n", value);
+    } else if (strcmp(param, "right") == 0) {
+        g_right_motor_factor = value;
+        printf("右轮系数设置为 %.2f\n", value);
+    } else if (strcmp(param, "turn") == 0) {
+        g_turn_factor = value;
+        printf("转向系数设置为 %.2f\n", value);
+    } else if (strcmp(param, "forward") == 0) {
+        g_forward_steps_per_cm = value;
+        printf("前进系数设置为 %.1f 步/厘米\n", value);
+    } else if (strcmp(param, "turn_ratio") == 0) {
+        g_turn_speed_ratio = value;
+        printf("转向速度比设置为 %.1f\n", value);
+    } else if (strcmp(param, "symmetric") == 0) {
+        g_symmetric_turn_enabled = (value > 0.5f) ? 1 : 0;
+        printf("对称转向 %s\n", g_symmetric_turn_enabled ? "开启" : "关闭");
+    } else {
+        printf("未知参数: %s\n", param);
+    }
+    
+    // 显示当前所有系数
+    printf("当前校准系数:\n");
+    printf("  左轮:%.2f, 右轮:%.2f, 转向:%.2f, 前进:%.1f\n",
+           g_left_motor_factor, g_right_motor_factor, 
+           g_turn_factor, g_forward_steps_per_cm);
+    printf("  对称转向:%s, 转向速度比:%.1f\n",
+           g_symmetric_turn_enabled ? "开" : "关", g_turn_speed_ratio);
+}
+
+// 获取转向对称性设置
+int car_get_symmetric_mode(void) {
+    return g_symmetric_turn_enabled;
+}
+
+// 执行单个命令
+void car_execute_command(const char* type, int value) {
+    if (strcmp(type, "forward") == 0) {
+        car_forward(value);
+    } else if (strcmp(type, "backward") == 0) {
+        car_backward(value);
+    } else if (strcmp(type, "left") == 0) {
+        car_turn_left(value);
+    } else if (strcmp(type, "right") == 0) {
+        car_turn_right(value);
+    } else if (strcmp(type, "spin_left") == 0) {
+        car_spin_left(value);
+    } else if (strcmp(type, "spin_right") == 0) {
+        car_spin_right(value);
+    } else if (strcmp(type, "stop") == 0) {
+        car_stop();
+        usleep(value * 1000);  // 毫秒转微秒
+    }
+}
+
+// 添加指令
+void car_add_command(const char* type, int value) {
+    if (g_command_count < 100) {
+        strncpy(g_command_queue[g_command_count].type, type, 15);
+        g_command_queue[g_command_count].type[15] = '\0';
+        g_command_queue[g_command_count].value = value;
+        g_command_count++;
+        printf("添加指令: %s %d\n", type, value);
+    }
+}
+
+// 清空指令
+void car_clear_commands(void) {
+    g_command_count = 0;
+    g_command_index = 0;
+    g_auto_mode = 0;
+    printf("指令队列已清空\n");
+}
+
+// 开始自动模式
+void car_start_auto_mode(void) {
+    if (g_command_count == 0) {
+        printf("指令队列为空\n");
+        return;
+    }
+    
+    g_command_index = 0;
+    g_auto_mode = 1;
+    printf("开始自动模式，共%d 个指令\n", g_command_count);
+}
+
+// 获取指令队列总数量
+int car_get_command_count(void) {
+    return g_command_count;
+}
+
+// 获取当前执行的指令索引
+int car_get_current_index(void) {
+    return g_command_index;
+}
+
+// ============ 改进的小车主任务 ============
+void car_task(void *arg) {
+    (void)arg;  // 避免未使用参数警告
+    
+    car_init();
+    
+    printf("小车任务启动，对称转向模式: %s\n", 
+           g_symmetric_turn_enabled ? "开启" : "关闭");
+    
+    while (1) {
+        // 自动模式执行
+        if (g_auto_mode && g_command_index < g_command_count) {
+            CarCommand* cmd = &g_command_queue[g_command_index];
+            
+            // 检查当前指令是否完成
+            if (g_car_info.step_count <= 0) {
+                // 执行下一个指令
+                car_execute_command(cmd->type, cmd->value);
+                g_command_index++;
+                
+                if (g_command_index >= g_command_count) {
+                    printf("自动模式完成\n");
+                    g_auto_mode = 0;
+                }
+            }
+        }
+        
+        // 步进计数减少
+        if (g_car_info.step_count > 0) {
+            g_car_info.step_count--;
+            
+            // 每20计数打印一次（更频繁的反饋）
+            if (g_car_info.step_count % 20 == 0) {
+                printf("剩余计数: %d\n", g_car_info.step_count);
+            }
+        } else if (g_car_info.step_count == 0 && g_car_info.status != CAR_STOP) {
+            car_stop();
+        }
+        
+        usleep(10000);  // 10ms
+    }
+}

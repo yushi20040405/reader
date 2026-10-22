@@ -1,0 +1,29 @@
+appId: com.example.epubreader
+productName: EPUB Reader
+directories:
+  buildResources: build
+  output: dist
+files:
+  - out/**
+  - package.json
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - nsis
+  # No code-signing certificate is configured for this project, and the
+  # winCodeSign toolchain requires symlink privileges that are not available in
+  # a normal Windows environment. Disable signing/resource-editing so packaging
+  # succeeds for unsigned local builds.
+  signAndEditExecutable: false
+mac:
+  target:
+    - dmg
+  category: public.app-category.books
+linux:
+  target:
+    - AppImage
+  category: Office
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
